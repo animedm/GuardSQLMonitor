@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database (for testing)
+  postgres:
+    image: postgres:16-alpine
+    container_name: guardsql-postgres
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - guardsql-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MySQL Database (for testing)
+  mysql:
+    image: mysql:8.0
+    container_name: guardsql-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: testdb
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - guardsql-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # SQL Server Database (for testing)
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: guardsql-mssql
+    environment:
+      ACCEPT_EULA: Y
+      SA_PASSWORD: YourPassword123!
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+    networks:
+      - guardsql-network
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "YourPassword123!", "-Q", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend Service
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: guardsql-backend
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      
+      # PostgreSQL
+      PG_ENABLED: "true"
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DATABASE: testdb
+      PG_USER: postgres
+      PG_PASSWORD: password
+      
+      # MySQL
+      MYSQL_ENABLED: "true"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: testdb
+      MYSQL_USER: root
+      MYSQL_PASSWORD: password
+      
+      # SQL Server
+      MSSQL_ENABLED: "true"
+      MSSQL_HOST: mssql
+      MSSQL_PORT: 1433
+      MSSQL_DATABASE: master
+      MSSQL_USER: sa
+      MSSQL_PASSWORD: YourPassword123!
+      
+      # Monitoring
+      METRICS_INTERVAL: 30000
+      SLOW_QUERY_THRESHOLD: 1000
+      
+      # Alerts
+      ALERTS_ENABLED: "true"
+      ALERT_EMAIL_ENABLED: "false"
+      
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      mssql:
+        condition: service_healthy
+    networks:
+      - guardsql-network
+    restart: unless-stopped
+
+  # Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: guardsql-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - guardsql-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  mysql_data:
+  mssql_data:
+
+networks:
+  guardsql-network:
+    driver: bridge
