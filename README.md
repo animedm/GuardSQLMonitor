@@ -477,7 +477,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 For issues, questions, or contributions:
 - Open an issue on GitHub
-- Contact: your-email@example.com
+
 
 ## 🗺️ Roadmap
 
