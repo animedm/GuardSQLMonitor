@@ -1,7 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { AlertTriangle, GitBranch, Database, RefreshCw, History, XCircle } from 'lucide-react';
 import ConnectionDetailModal from '../components/ConnectionDetailModal';
+import { Layout } from '../components/Layout';
+import { useActiveConnection } from '../hooks/useActiveConnection';
+import { retryWithBackoff } from '../utils/retry';
+import { useRefreshSettings } from '../hooks/useRefreshSettings';
+import { useToast } from '../components/ToastProvider';
 
 interface DeadlockQuery {
   pid: number;
@@ -37,9 +41,8 @@ interface ConnectionInfo {
 }
 
 const DeadlockAnalyzerPage: React.FC = () => {
-  const navigate = useNavigate();
-  const [databaseType, setDatabaseType] = useState('postgres');
-  const [databaseName, setDatabaseName] = useState('neondb');
+  const { refreshIntervalSec } = useRefreshSettings();
+  const { showToast } = useToast();
   const [scanning, setScanning] = useState(false);
   const [currentDeadlock, setCurrentDeadlock] = useState<DeadlockInfo | null>(null);
   const [history, setHistory] = useState<DeadlockInfo[]>([]);
@@ -48,6 +51,13 @@ const DeadlockAnalyzerPage: React.FC = () => {
   const [autoScan, setAutoScan] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState<ConnectionInfo | null>(null);
   const [showConnectionModal, setShowConnectionModal] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const {
+    connectionOptions,
+    selectedConnection: activeConnection,
+    selectedKey,
+    setActiveConnection
+  } = useActiveConnection({ allowedTypes: ['postgres', 'mysql'] });
 
   useEffect(() => {
     loadHistory();
@@ -56,20 +66,27 @@ const DeadlockAnalyzerPage: React.FC = () => {
     if (autoScan) {
       const interval = setInterval(() => {
         scanForDeadlocks();
-      }, 30000); // Every 30 seconds
+      }, refreshIntervalSec * 1000);
 
       return () => clearInterval(interval);
     }
-  }, [autoScan, databaseType, databaseName]);
+  }, [autoScan, activeConnection?.key, refreshIntervalSec]);
 
   const scanForDeadlocks = async () => {
     setScanning(true);
     try {
-      const response = await fetch('http://localhost:3001/api/monitoring/deadlocks/detect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ databaseType, databaseName })
-      });
+      if (!activeConnection) {
+        setErrorMessage('Selecciona una conexion activa para escanear deadlocks.');
+        return;
+      }
+
+      const response = await retryWithBackoff(() =>
+        fetch('/api/monitoring/deadlocks/detect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ databaseType: activeConnection.type, databaseName: activeConnection.name })
+        })
+      );
 
       if (!response.ok) throw new Error('Failed to scan for deadlocks');
 
@@ -77,11 +94,16 @@ const DeadlockAnalyzerPage: React.FC = () => {
       if (data.deadlockDetected) {
         setCurrentDeadlock(data.deadlock);
         loadHistory(); // Refresh history
+        showToast('Deadlock detectado y registrado en historial.', 'warning');
       } else {
         setCurrentDeadlock(null);
+        showToast('No se detectaron deadlocks en el escaneo actual.', 'info');
       }
+      setErrorMessage(null);
     } catch (error) {
       console.error('Error scanning for deadlocks:', error);
+      setErrorMessage('No se pudo completar el escaneo de deadlocks. Verifica la conexion activa y vuelve a intentar.');
+      showToast('Fallo el escaneo de deadlocks.', 'error');
     } finally {
       setScanning(false);
     }
@@ -89,33 +111,48 @@ const DeadlockAnalyzerPage: React.FC = () => {
 
   const loadHistory = async () => {
     try {
-      const response = await fetch('http://localhost:3001/api/monitoring/deadlocks/history?limit=20');
+      const response = await retryWithBackoff(() => fetch('/api/monitoring/deadlocks/history?limit=20'));
       if (!response.ok) throw new Error('Failed to load history');
 
       const data = await response.json();
       setHistory(data.deadlocks || []);
+      setErrorMessage(null);
     } catch (error) {
       console.error('Error loading history:', error);
+      setErrorMessage('No se pudo cargar el historial de deadlocks.');
+      showToast('No se pudo cargar el historial de deadlocks.', 'error');
     }
   };
 
   const loadConnections = async () => {
     try {
-      const response = await fetch(
-        `http://localhost:3001/api/monitoring/connections?databaseType=${databaseType}&databaseName=${databaseName}`
+      if (!activeConnection) {
+        setConnections([]);
+        setErrorMessage(null);
+        return;
+      }
+
+      const response = await retryWithBackoff(() =>
+        fetch(
+          `/api/monitoring/connections?databaseType=${encodeURIComponent(activeConnection.type)}&databaseName=${encodeURIComponent(activeConnection.name)}`
+        )
       );
       if (!response.ok) throw new Error('Failed to load connections');
 
       const data = await response.json();
       setConnections(data.connections || []);
+      setErrorMessage(null);
     } catch (error) {
       console.error('Error loading connections:', error);
+      setConnections([]);
+      setErrorMessage('No se pudo cargar la lista de conexiones activas para esta base.');
+      showToast('No se pudo cargar la lista de conexiones activas.', 'error');
     }
   };
 
   const clearHistory = async () => {
     try {
-      const response = await fetch('http://localhost:3001/api/monitoring/deadlocks/history', {
+      const response = await fetch('/api/monitoring/deadlocks/history', {
         method: 'DELETE'
       });
       if (!response.ok) throw new Error('Failed to clear history');
@@ -140,16 +177,10 @@ const DeadlockAnalyzerPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 p-6">
+    <Layout>
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <button
-            onClick={() => navigate('/')}
-            className="mb-4 text-blue-400 hover:text-blue-300 flex items-center gap-2 transition-colors"
-          >
-            ← Back to Dashboard
-          </button>
           <h1 className="text-4xl font-bold text-white mb-2 flex items-center gap-3">
             <AlertTriangle className="text-red-500" size={36} />
             Deadlock Analyzer
@@ -163,22 +194,26 @@ const DeadlockAnalyzerPage: React.FC = () => {
         <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl shadow-2xl p-6 border border-gray-700/50 mb-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Database Type</label>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Active Database</label>
               <select
-                value={databaseType}
-                onChange={(e) => setDatabaseType(e.target.value)}
+                value={selectedKey}
+                onChange={(e) => setActiveConnection(e.target.value)}
                 className="w-full bg-gray-900/50 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                <option value="postgres">PostgreSQL</option>
-                <option value="mysql">MySQL</option>
+                {connectionOptions.length === 0 && <option value="">No active connections</option>}
+                {connectionOptions.map((conn) => (
+                  <option key={conn.key} value={conn.key}>
+                    {conn.type.toUpperCase()} - {conn.name}
+                  </option>
+                ))}
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Database Name</label>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Connection Host</label>
               <input
                 type="text"
-                value={databaseName}
-                onChange={(e) => setDatabaseName(e.target.value)}
+                value={activeConnection ? `${activeConnection.host}:${activeConnection.port}` : ''}
+                readOnly
                 className="w-full bg-gray-900/50 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
@@ -190,7 +225,7 @@ const DeadlockAnalyzerPage: React.FC = () => {
                   onChange={(e) => setAutoScan(e.target.checked)}
                   className="w-4 h-4 text-blue-600 bg-gray-900 border-gray-600 rounded focus:ring-blue-500"
                 />
-                Auto-scan (30s)
+                Auto-scan ({refreshIntervalSec}s)
               </label>
             </div>
           </div>
@@ -229,6 +264,19 @@ const DeadlockAnalyzerPage: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {!activeConnection && (
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 text-center mb-6">
+            <p className="text-slate-300 font-medium">No hay conexion activa para analizar deadlocks.</p>
+            <p className="text-slate-400 text-sm mt-1">Selecciona una conexion desde Settings y luego el alias en esta vista.</p>
+          </div>
+        )}
+
+        {errorMessage && (
+          <div className="bg-red-500/15 border border-red-500/40 rounded-lg p-4 mb-6">
+            <p className="text-red-300 text-sm">{errorMessage}</p>
+          </div>
+        )}
 
         {/* Current Deadlock Alert */}
         {currentDeadlock && (
@@ -477,7 +525,7 @@ const DeadlockAnalyzerPage: React.FC = () => {
         connection={selectedConnection}
         onClose={() => setShowConnectionModal(false)}
       />
-    </div>
+    </Layout>
   );
 };
 

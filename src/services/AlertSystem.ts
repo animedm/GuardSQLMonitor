@@ -12,6 +12,15 @@ interface AlertInput {
   metric?: string;
   value?: number;
   threshold?: number;
+  cooldownMs?: number;
+  notifyEmail?: {
+    enabled: boolean;
+    to: string;
+  };
+  notifyWebhook?: {
+    enabled: boolean;
+    url: string;
+  };
 }
 
 export class AlertSystem {
@@ -19,10 +28,10 @@ export class AlertSystem {
   private alerts: Map<string, Alert> = new Map();
   private emailTransporter: nodemailer.Transporter | null = null;
   private alertCooldown: Map<string, number> = new Map();
-  private readonly cooldownPeriod = 5 * 60 * 1000; // 5 minutes
+  private readonly defaultCooldownPeriod = 5 * 60 * 1000; // 5 minutes
 
   private constructor() {
-    if (config.alerts.email.enabled) {
+    if (config.alerts.email.smtp.host) {
       this.setupEmailTransporter();
     }
   }
@@ -36,14 +45,21 @@ export class AlertSystem {
 
   private setupEmailTransporter(): void {
     try {
-      this.emailTransporter = nodemailer.createTransport({
+      const transportConfig: any = {
         host: config.alerts.email.smtp.host,
         port: config.alerts.email.smtp.port,
-        secure: false,
-        auth: {
+        secure: false
+      };
+
+      if (config.alerts.email.smtp.user) {
+        transportConfig.auth = {
           user: config.alerts.email.smtp.user,
           pass: config.alerts.email.smtp.password
-        }
+        };
+      }
+
+      this.emailTransporter = nodemailer.createTransport({
+        ...transportConfig
       });
       logger.info('Email alerting configured');
     } catch (error) {
@@ -52,15 +68,17 @@ export class AlertSystem {
   }
 
   public createAlert(input: AlertInput): Alert {
-    if (!config.alerts.enabled) {
+    if (!config.alerts.enabled && !input.notifyEmail?.enabled) {
       return this.buildAlert(input);
     }
+
+    const cooldownMs = input.cooldownMs && input.cooldownMs > 0 ? input.cooldownMs : this.defaultCooldownPeriod;
 
     // Check cooldown to avoid alert spam
     const alertKey = `${input.database}:${input.type}`;
     const lastAlertTime = this.alertCooldown.get(alertKey);
     
-    if (lastAlertTime && Date.now() - lastAlertTime < this.cooldownPeriod) {
+    if (lastAlertTime && Date.now() - lastAlertTime < cooldownMs) {
       logger.debug(`Alert ${alertKey} is in cooldown period`);
       return this.buildAlert(input);
     }
@@ -77,9 +95,21 @@ export class AlertSystem {
     });
 
     // Send email notification if enabled
-    if (config.alerts.email.enabled && (alert.severity === 'critical' || alert.severity === 'warning')) {
-      this.sendEmailAlert(alert).catch(err => 
+    const emailEnabled = typeof input.notifyEmail?.enabled === 'boolean' ? input.notifyEmail.enabled : config.alerts.email.enabled;
+    const emailTo = typeof input.notifyEmail?.to === 'string' ? input.notifyEmail.to : config.alerts.email.to;
+
+    if (emailEnabled && emailTo && (alert.severity === 'critical' || alert.severity === 'warning')) {
+      this.sendEmailAlert(alert, emailTo).catch(err => 
         logger.error('Failed to send email alert:', err)
+      );
+    }
+
+    const webhookEnabled = Boolean(input.notifyWebhook?.enabled);
+    const webhookUrl = input.notifyWebhook?.url || '';
+
+    if (webhookEnabled && webhookUrl) {
+      this.sendWebhookAlert(alert, webhookUrl).catch(err =>
+        logger.error('Failed to send webhook alert:', err)
       );
     }
 
@@ -101,7 +131,11 @@ export class AlertSystem {
     };
   }
 
-  private async sendEmailAlert(alert: Alert): Promise<void> {
+  private async sendEmailAlert(alert: Alert, recipient: string): Promise<void> {
+    if (!this.emailTransporter) {
+      this.setupEmailTransporter();
+    }
+
     if (!this.emailTransporter) {
       return;
     }
@@ -128,7 +162,7 @@ GuardSQL Monitor
     try {
       await this.emailTransporter.sendMail({
         from: config.alerts.email.smtp.user,
-        to: config.alerts.email.to,
+        to: recipient,
         subject,
         text: body
       });
@@ -136,6 +170,33 @@ GuardSQL Monitor
     } catch (error) {
       logger.error('Failed to send email:', error);
       throw error;
+    }
+  }
+
+  private async sendWebhookAlert(alert: Alert, webhookUrl: string): Promise<void> {
+    const payload = {
+      id: alert.id,
+      timestamp: alert.timestamp.toISOString(),
+      severity: alert.severity,
+      database: alert.database,
+      type: alert.type,
+      message: alert.message,
+      metric: alert.metric,
+      value: alert.value,
+      threshold: alert.threshold,
+      resolved: alert.resolved
+    };
+
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Webhook request failed with status ${response.status}`);
     }
   }
 

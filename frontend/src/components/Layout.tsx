@@ -1,6 +1,10 @@
-import { ReactNode } from 'react';
+import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, Link } from 'react-router-dom';
-import { Database, Activity, Bell, BarChart3, RefreshCw, Layout as LayoutIcon, Clock, Search, AlertTriangle, Users } from 'lucide-react';
+import { Database, Activity, Bell, BarChart3, RefreshCw, Layout as LayoutIcon, Clock, Search, AlertTriangle, Users, Settings } from 'lucide-react';
+import { useActiveConnection } from '../hooks/useActiveConnection';
+import { api } from '../api';
+import { useRefreshSettings } from '../hooks/useRefreshSettings';
+import { useToast } from './ToastProvider';
 
 interface LayoutProps {
   children: ReactNode;
@@ -8,8 +12,64 @@ interface LayoutProps {
 
 export function Layout({ children }: LayoutProps) {
   const location = useLocation();
+  const { selectedKey, setActiveConnection, connectionOptions } = useActiveConnection();
+  const { refreshIntervalSec, setRefreshIntervalSec } = useRefreshSettings();
+  const { preferences, setTypeEnabled } = useToast();
+  const [healthStatus, setHealthStatus] = useState<'healthy' | 'degraded' | 'unhealthy' | 'error'>('healthy');
+  const [showNotificationsMenu, setShowNotificationsMenu] = useState(false);
+  const notificationsRef = useRef<HTMLDivElement | null>(null);
 
   const isActive = (path: string) => location.pathname === path;
+
+  useEffect(() => {
+    const loadHealth = async () => {
+      try {
+        const health = await api.getHealth();
+        setHealthStatus(health?.status || 'healthy');
+      } catch {
+        setHealthStatus('error');
+      }
+    };
+
+    loadHealth();
+    const interval = setInterval(loadHealth, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const onClickOutside = (event: MouseEvent) => {
+      if (!notificationsRef.current) {
+        return;
+      }
+      if (!notificationsRef.current.contains(event.target as Node)) {
+        setShowNotificationsMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, []);
+
+  const healthBadge = useMemo(() => {
+    if (healthStatus === 'healthy') {
+      return {
+        icon: 'text-green-500',
+        text: 'All Systems Operational'
+      };
+    }
+
+    if (healthStatus === 'degraded') {
+      return {
+        icon: 'text-yellow-500',
+        text: 'Systems Degraded'
+      };
+    }
+
+    return {
+      icon: 'text-red-500',
+      text: 'Systems Unavailable'
+    };
+  }, [healthStatus]);
 
   return (
     <div className="min-h-screen bg-slate-900">
@@ -27,12 +87,88 @@ export function Layout({ children }: LayoutProps) {
               </div>
             </div>
             <div className="flex items-center space-x-4">
-              <button className="p-2 text-slate-400 hover:text-white transition-colors">
-                <Bell className="w-5 h-5" />
-              </button>
+              <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700/60 border border-slate-600 text-xs">
+                <Database className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-slate-400">Active DB:</span>
+                <select
+                  value={selectedKey}
+                  onChange={(e) => setActiveConnection(e.target.value)}
+                  className="bg-slate-800 text-slate-100 border border-slate-600 rounded px-2 py-1 focus:outline-none"
+                >
+                  {connectionOptions.length === 0 && <option value="">None</option>}
+                  {connectionOptions.map((conn) => (
+                    <option key={conn.key} value={conn.key}>
+                      {conn.type.toUpperCase()} / {conn.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="hidden xl:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700/60 border border-slate-600 text-xs">
+                <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-slate-400">Refresh:</span>
+                <select
+                  value={refreshIntervalSec}
+                  onChange={(e) => setRefreshIntervalSec(Number(e.target.value))}
+                  className="bg-slate-800 text-slate-100 border border-slate-600 rounded px-2 py-1 focus:outline-none"
+                >
+                  <option value={15}>15s</option>
+                  <option value={30}>30s</option>
+                  <option value={60}>60s</option>
+                  <option value={120}>120s</option>
+                </select>
+              </div>
+              <div className="relative" ref={notificationsRef}>
+                <button
+                  onClick={() => setShowNotificationsMenu((prev) => !prev)}
+                  className="p-2 text-slate-400 hover:text-white transition-colors"
+                  title="Notification settings"
+                >
+                  <Bell className="w-5 h-5" />
+                </button>
+                {showNotificationsMenu && (
+                  <div className="absolute right-0 mt-2 w-64 rounded-lg border border-slate-600 bg-slate-800 shadow-xl p-3 z-50">
+                    <p className="text-xs uppercase tracking-wide text-slate-400 mb-2">Notifications</p>
+                    <div className="space-y-2 text-sm text-slate-200">
+                      <label className="flex items-center justify-between">
+                        <span>Errors</span>
+                        <input
+                          type="checkbox"
+                          checked={preferences.error}
+                          onChange={(e) => setTypeEnabled('error', e.target.checked)}
+                        />
+                      </label>
+                      <label className="flex items-center justify-between">
+                        <span>Warnings</span>
+                        <input
+                          type="checkbox"
+                          checked={preferences.warning}
+                          onChange={(e) => setTypeEnabled('warning', e.target.checked)}
+                        />
+                      </label>
+                      <label className="flex items-center justify-between">
+                        <span>Info</span>
+                        <input
+                          type="checkbox"
+                          checked={preferences.info}
+                          onChange={(e) => setTypeEnabled('info', e.target.checked)}
+                        />
+                      </label>
+                      <label className="flex items-center justify-between">
+                        <span>Success</span>
+                        <input
+                          type="checkbox"
+                          checked={preferences.success}
+                          onChange={(e) => setTypeEnabled('success', e.target.checked)}
+                        />
+                      </label>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-3">Repeated messages are automatically muted for 10s.</p>
+                  </div>
+                )}
+              </div>
               <div className="flex items-center space-x-2 text-sm text-slate-400">
-                <Activity className="w-4 h-4 text-green-500" />
-                <span>All Systems Operational</span>
+                <Activity className={`w-4 h-4 ${healthBadge.icon}`} />
+                <span>{healthBadge.text}</span>
               </div>
             </div>
           </div>
@@ -132,6 +268,19 @@ export function Layout({ children }: LayoutProps) {
               <div className="flex items-center space-x-2">
                 <Users className="w-4 h-4" />
                 <span>Connection Pool</span>
+              </div>
+            </Link>
+            <Link
+              to="/config"
+              className={`px-4 py-3 text-sm font-medium transition-colors ${
+                isActive('/config')
+                  ? 'text-white bg-slate-900 border-b-2 border-blue-500'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-700'
+              }`}
+            >
+              <div className="flex items-center space-x-2">
+                <Settings className="w-4 h-4" />
+                <span>Settings</span>
               </div>
             </Link>
           </div>

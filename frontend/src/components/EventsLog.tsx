@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Bell, AlertCircle, AlertTriangle, Info, CheckCircle, Filter } from 'lucide-react';
+import { Bell, AlertCircle, AlertTriangle, Info, CheckCircle, Filter, Search } from 'lucide-react';
+import { useRefreshSettings } from '../hooks/useRefreshSettings';
+import { useToast } from './ToastProvider';
 
 interface Event {
   id: number;
@@ -17,19 +19,26 @@ interface EventsLogProps {
   limit?: number;
   startDate?: string;
   endDate?: string;
+  databaseType?: string;
+  databaseName?: string;
 }
 
 export const EventsLog: React.FC<EventsLogProps> = ({
   autoRefresh = true,
   limit = 50,
   startDate,
-  endDate
+  endDate,
+  databaseType,
+  databaseName
 }) => {
+  const { refreshIntervalSec } = useRefreshSettings();
+  const { showToast } = useToast();
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
   const [filterType, setFilterType] = useState<string>('all');
+  const [searchText, setSearchText] = useState('');
 
   const fetchEvents = async () => {
     try {
@@ -46,14 +55,39 @@ export const EventsLog: React.FC<EventsLogProps> = ({
       if (filterSeverity !== 'all') params.append('severity', filterSeverity);
       if (filterType !== 'all') params.append('eventType', filterType);
 
-      const response = await fetch(`http://localhost:3001/api/history/events?${params}`);
+      const response = await fetch(`/api/history/events?${params}`);
       if (!response.ok) throw new Error('Failed to fetch events');
       
       const data = await response.json();
-      setEvents(data);
+      const filtered = (data as Event[]).filter((event) => {
+        if (!databaseType && !databaseName) {
+          return true;
+        }
+        if (databaseType && event.database_type !== databaseType) {
+          return false;
+        }
+        if (databaseName && event.database_name !== databaseName) {
+          return false;
+        }
+        return true;
+      });
+
+      const term = searchText.trim().toLowerCase();
+      const textFiltered = term
+        ? filtered.filter((event) => {
+            return [event.event_type, event.message, event.details, event.database_type, event.database_name]
+              .filter(Boolean)
+              .join(' ')
+              .toLowerCase()
+              .includes(term);
+          })
+        : filtered;
+
+      setEvents(textFiltered);
       setError(null);
     } catch (err: any) {
       setError(err.message);
+      showToast('No se pudieron cargar los eventos historicos.', 'error');
     } finally {
       setLoading(false);
     }
@@ -63,10 +97,10 @@ export const EventsLog: React.FC<EventsLogProps> = ({
     fetchEvents();
     
     if (autoRefresh) {
-      const interval = setInterval(fetchEvents, 30000);
+      const interval = setInterval(fetchEvents, refreshIntervalSec * 1000);
       return () => clearInterval(interval);
     }
-  }, [filterSeverity, filterType, limit, autoRefresh, startDate, endDate]);
+  }, [filterSeverity, filterType, searchText, limit, autoRefresh, startDate, endDate, databaseType, databaseName, refreshIntervalSec]);
 
   const getSeverityIcon = (severity: string) => {
     switch (severity) {
@@ -181,6 +215,16 @@ export const EventsLog: React.FC<EventsLogProps> = ({
             <option key={type} value={type}>{type}</option>
           ))}
         </select>
+
+        <div className="flex items-center gap-2 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2">
+          <Search size={14} className="text-slate-400" />
+          <input
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            placeholder="Search text"
+            className="bg-transparent text-white text-sm focus:outline-none"
+          />
+        </div>
       </div>
 
       {/* Events list */}

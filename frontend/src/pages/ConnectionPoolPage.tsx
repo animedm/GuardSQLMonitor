@@ -1,7 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { Activity, Database, AlertTriangle, TrendingUp, TrendingDown, Minus, Users, XCircle } from 'lucide-react';
 import ConnectionDetailModal from '../components/ConnectionDetailModal';
+import { Layout } from '../components/Layout';
+import { useActiveConnection } from '../hooks/useActiveConnection';
+import { retryWithBackoff } from '../utils/retry';
+import { useRefreshSettings } from '../hooks/useRefreshSettings';
+import { useToast } from '../components/ToastProvider';
 import {
   LineChart,
   Line,
@@ -75,10 +79,11 @@ interface PoolTrends {
 }
 
 const ConnectionPoolPage: React.FC = () => {
-  const navigate = useNavigate();
-  const [databaseType, setDatabaseType] = useState('postgres');
-  const [databaseName, setDatabaseName] = useState('neondb');
+  const { refreshIntervalSec } = useRefreshSettings();
+  const { showToast } = useToast();
   const [loading, setLoading] = useState(false);
+  const [loadingConnections, setLoadingConnections] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [poolStats, setPoolStats] = useState<PoolStats | null>(null);
   const [history, setHistory] = useState<PoolMetrics[]>([]);
   const [trends, setTrends] = useState<PoolTrends | null>(null);
@@ -86,12 +91,18 @@ const ConnectionPoolPage: React.FC = () => {
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [selectedConnection, setSelectedConnection] = useState<any>(null);
   const [showConnectionModal, setShowConnectionModal] = useState(false);
+  const {
+    connectionOptions,
+    selectedConnection: activeConnection,
+    selectedKey,
+    setActiveConnection
+  } = useActiveConnection({ allowedTypes: ['postgres', 'mysql'] });
 
   const openConnectionDetails = (leak: ConnectionLeak) => {
     // Convert ConnectionLeak to ConnectionInfo format for modal
     const connectionInfo = {
       ...leak,
-      database: databaseName,
+      database: activeConnection?.name || 'unknown',
       duration: leak.idleTime,
       waitEvent: undefined,
       blocked: false,
@@ -115,18 +126,30 @@ const ConnectionPoolPage: React.FC = () => {
   };
 
   const loadConnections = async () => {
+    if (!activeConnection) {
+      setConnections([]);
+      return;
+    }
+
+    setLoadingConnections(true);
     try {
-      const response = await fetch(
-        `http://localhost:3001/api/monitoring/connections?databaseType=${databaseType}&databaseName=${databaseName}`
+      const response = await retryWithBackoff(() =>
+        fetch(
+          `/api/monitoring/connections?databaseType=${encodeURIComponent(activeConnection.type)}&databaseName=${encodeURIComponent(activeConnection.name)}`
+        )
       );
       if (!response.ok) throw new Error('Failed to load connections');
 
       const data = await response.json();
-      // Ensure data is an array
-      setConnections(Array.isArray(data) ? data : []);
+      setConnections(Array.isArray(data.connections) ? data.connections : []);
+      setErrorMessage(null);
     } catch (error) {
       console.error('Error loading connections:', error);
       setConnections([]);
+      setErrorMessage('No se pudo cargar el detalle de conexiones. Revisa que la conexion activa este disponible.');
+      showToast('No se pudo cargar el detalle de conexiones.', 'error');
+    } finally {
+      setLoadingConnections(false);
     }
   };
 
@@ -142,24 +165,36 @@ const ConnectionPoolPage: React.FC = () => {
         loadHistory();
         loadTrends();
         loadConnections();
-      }, 30000);
+      }, refreshIntervalSec * 1000);
 
       return () => clearInterval(interval);
     }
-  }, [autoRefresh, databaseType, databaseName]);
+  }, [autoRefresh, activeConnection?.key, refreshIntervalSec]);
 
   const loadPoolStats = async () => {
     setLoading(true);
     try {
-      const response = await fetch(
-        `http://localhost:3001/api/monitoring/pool/stats?databaseType=${databaseType}&databaseName=${databaseName}`
+      if (!activeConnection) {
+        setPoolStats(null);
+        setErrorMessage(null);
+        return;
+      }
+
+      const response = await retryWithBackoff(() =>
+        fetch(
+          `/api/monitoring/pool/stats?databaseType=${encodeURIComponent(activeConnection.type)}&databaseName=${encodeURIComponent(activeConnection.name)}`
+        )
       );
       if (!response.ok) throw new Error('Failed to load pool stats');
 
       const data = await response.json();
       setPoolStats(data);
+      setErrorMessage(null);
     } catch (error) {
       console.error('Error loading pool stats:', error);
+      setPoolStats(null);
+      setErrorMessage('No se pudo cargar el estado del pool. Intenta refrescar o valida la conexion activa.');
+      showToast('No se pudo cargar el estado del pool.', 'error');
     } finally {
       setLoading(false);
     }
@@ -167,8 +202,15 @@ const ConnectionPoolPage: React.FC = () => {
 
   const loadHistory = async () => {
     try {
-      const response = await fetch(
-        `http://localhost:3001/api/monitoring/pool/history?databaseName=${databaseName}&limit=50`
+      if (!activeConnection) {
+        setHistory([]);
+        return;
+      }
+
+      const response = await retryWithBackoff(() =>
+        fetch(
+          `/api/monitoring/pool/history?databaseName=${encodeURIComponent(activeConnection.name)}&limit=50`
+        )
       );
       if (!response.ok) throw new Error('Failed to load history');
 
@@ -181,8 +223,15 @@ const ConnectionPoolPage: React.FC = () => {
 
   const loadTrends = async () => {
     try {
-      const response = await fetch(
-        `http://localhost:3001/api/monitoring/pool/trends?databaseName=${databaseName}`
+      if (!activeConnection) {
+        setTrends(null);
+        return;
+      }
+
+      const response = await retryWithBackoff(() =>
+        fetch(
+          `/api/monitoring/pool/trends?databaseName=${encodeURIComponent(activeConnection.name)}`
+        )
       );
       if (!response.ok) throw new Error('Failed to load trends');
 
@@ -219,16 +268,10 @@ const ConnectionPoolPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 p-6">
+    <Layout>
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <button
-            onClick={() => navigate('/')}
-            className="mb-4 text-blue-400 hover:text-blue-300 flex items-center gap-2 transition-colors"
-          >
-            ← Back to Dashboard
-          </button>
           <h1 className="text-4xl font-bold text-white mb-2 flex items-center gap-3">
             <Activity className="text-blue-500" size={36} />
             Connection Pool Monitor
@@ -242,22 +285,26 @@ const ConnectionPoolPage: React.FC = () => {
         <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl shadow-2xl p-6 border border-gray-700/50 mb-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Database Type</label>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Active Database</label>
               <select
-                value={databaseType}
-                onChange={(e) => setDatabaseType(e.target.value)}
+                value={selectedKey}
+                onChange={(e) => setActiveConnection(e.target.value)}
                 className="w-full bg-gray-900/50 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                <option value="postgres">PostgreSQL</option>
-                <option value="mysql">MySQL</option>
+                {connectionOptions.length === 0 && <option value="">No active connections</option>}
+                {connectionOptions.map((conn) => (
+                  <option key={conn.key} value={conn.key}>
+                    {conn.type.toUpperCase()} - {conn.name}
+                  </option>
+                ))}
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Database Name</label>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Connection Host</label>
               <input
                 type="text"
-                value={databaseName}
-                onChange={(e) => setDatabaseName(e.target.value)}
+                value={activeConnection ? `${activeConnection.host}:${activeConnection.port}` : ''}
+                readOnly
                 className="w-full bg-gray-900/50 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
@@ -269,13 +316,14 @@ const ConnectionPoolPage: React.FC = () => {
                   onChange={(e) => setAutoRefresh(e.target.checked)}
                   className="w-4 h-4 text-blue-600 bg-gray-900 border-gray-600 rounded focus:ring-blue-500"
                 />
-                Auto-refresh (30s)
+                Auto-refresh ({refreshIntervalSec}s)
               </label>
               <button
                 onClick={() => {
                   loadPoolStats();
                   loadHistory();
                   loadTrends();
+                  loadConnections();
                 }}
                 disabled={loading}
                 className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors"
@@ -285,6 +333,19 @@ const ConnectionPoolPage: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {!activeConnection && (
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 text-center mb-6">
+            <p className="text-slate-300 font-medium">No hay conexion activa para monitorear.</p>
+            <p className="text-slate-400 text-sm mt-1">Activa una conexion en Settings y selecciona un alias en esta pantalla.</p>
+          </div>
+        )}
+
+        {errorMessage && (
+          <div className="bg-red-500/15 border border-red-500/40 rounded-lg p-4 mb-6">
+            <p className="text-red-300 text-sm">{errorMessage}</p>
+          </div>
+        )}
 
         {poolStats && (
           <>
@@ -400,6 +461,12 @@ const ConnectionPoolPage: React.FC = () => {
             </div>
 
             {/* All Active Connections */}
+            {loadingConnections && (
+              <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 mb-6">
+                <p className="text-slate-300 text-sm">Cargando conexiones activas...</p>
+              </div>
+            )}
+
             {Array.isArray(connections) && connections.length > 0 && (
               <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl shadow-2xl p-6 border border-gray-700/50 mb-6">
                 <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
@@ -628,7 +695,7 @@ const ConnectionPoolPage: React.FC = () => {
         connection={selectedConnection}
         onClose={() => setShowConnectionModal(false)}
       />
-    </div>
+    </Layout>
   );
 };
 
