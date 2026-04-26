@@ -1,5 +1,5 @@
 import { DatabaseMetrics } from '../api';
-import { Activity, HardDrive, Zap, Database as DBIcon } from 'lucide-react';
+import { Activity, HardDrive, Zap } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 interface DatabaseCardProps {

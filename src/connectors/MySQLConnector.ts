@@ -2,6 +2,7 @@ import mysql, { Pool, PoolConnection } from 'mysql2/promise';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { DatabaseMetrics } from '../types';
+import { ManagedConnection } from '../config/connections';
 
 export class MySQLConnector {
   private pool: Pool | null = null;
@@ -192,5 +193,140 @@ export class MySQLConnector {
 
   public getPool(): Pool | null {
     return this.pool;
+  }
+
+  public async getMetricsForConnection(conn: ManagedConnection): Promise<DatabaseMetrics> {
+    const startTime = Date.now();
+    const connection = await mysql.createConnection({
+      host: conn.host,
+      port: conn.port,
+      database: conn.database,
+      user: conn.user,
+      password: conn.password,
+      connectTimeout: 5000
+    });
+
+    try {
+      const [processlist]: any = await connection.query('SHOW PROCESSLIST');
+      const [variables]: any = await connection.query("SHOW VARIABLES LIKE 'max_connections'");
+      const maxConnections = parseInt(variables[0]?.Value || '151');
+
+      const activeConnections = processlist.filter((p: any) => p.Command !== 'Sleep').length;
+      const idleConnections = processlist.filter((p: any) => p.Command === 'Sleep').length;
+
+      const [status]: any = await connection.query('SHOW GLOBAL STATUS');
+      const statusMap = new Map(status.map((s: any) => [s.Variable_name, s.Value]));
+      const slowQueries = parseInt(String(statusMap.get('Slow_queries') || '0'));
+
+      const [sizeResult]: any = await connection.query(`
+        SELECT 
+          SUM(data_length + index_length) as total_size,
+          SUM(data_length) as data_size,
+          SUM(index_length) as index_size
+        FROM information_schema.TABLES
+        WHERE table_schema = ?
+      `, [conn.database]);
+
+      const [versionResult]: any = await connection.query('SELECT VERSION() as version');
+      const uptime = parseInt(String(statusMap.get('Uptime') || '0'));
+
+      const qcacheHits = parseInt(String(statusMap.get('Qcache_hits') || '0'));
+      const comSelect = parseInt(String(statusMap.get('Com_select') || '0'));
+      const cacheHitRatio = comSelect > 0 ? (qcacheHits * 100) / (qcacheHits + comSelect) : 0;
+
+      const responseTime = Date.now() - startTime;
+      const size = sizeResult[0];
+
+      return {
+        timestamp: new Date(),
+        databaseType: 'mysql',
+        databaseName: conn.name || conn.database,
+        status: 'healthy',
+        responseTime,
+        connections: {
+          active: activeConnections,
+          idle: idleConnections,
+          total: processlist.length,
+          max: maxConnections,
+          waiting: 0
+        },
+        performance: {
+          queriesPerSecond: 0,
+          slowQueries,
+          avgQueryTime: 0,
+          transactionsPerSecond: 0
+        },
+        resources: {
+          cacheHitRatio
+        },
+        size: {
+          totalSizeMB: parseInt(size?.total_size || '0') / (1024 * 1024),
+          dataSize: parseInt(size?.data_size || '0') / (1024 * 1024),
+          indexSize: parseInt(size?.index_size || '0') / (1024 * 1024)
+        },
+        uptime,
+        version: versionResult[0]?.version
+      };
+    } finally {
+      await connection.end();
+    }
+  }
+
+  public async getSlowQueriesForConnection(conn: ManagedConnection, limit: number = 10): Promise<any[]> {
+    const connection = await mysql.createConnection({
+      host: conn.host,
+      port: conn.port,
+      database: conn.database,
+      user: conn.user,
+      password: conn.password,
+      connectTimeout: 5000
+    });
+
+    try {
+      const [slowLog]: any = await connection.query(`
+        SELECT 
+          sql_text as query,
+          query_time as avg_time,
+          lock_time,
+          rows_sent,
+          rows_examined
+        FROM mysql.slow_log
+        ORDER BY query_time DESC
+        LIMIT ?
+      `, [limit]);
+      return slowLog;
+    } catch {
+      return [];
+    } finally {
+      await connection.end();
+    }
+  }
+
+  public async healthCheckForConnection(conn: ManagedConnection): Promise<{ status: 'up' | 'down'; responseTime: number; error?: string }> {
+    const startTime = Date.now();
+
+    try {
+      const connection = await mysql.createConnection({
+        host: conn.host,
+        port: conn.port,
+        database: conn.database,
+        user: conn.user,
+        password: conn.password,
+        connectTimeout: 5000
+      });
+      await connection.query('SELECT 1');
+      await connection.end();
+
+      return {
+        status: 'up',
+        responseTime: Date.now() - startTime
+      };
+    } catch (error: any) {
+      return {
+        status: 'down',
+        responseTime: Date.now() - startTime,
+        error: error.message
+      };
+    }
   }
 }

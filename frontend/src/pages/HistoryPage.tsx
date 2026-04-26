@@ -3,15 +3,19 @@ import { SlowQueriesHistory } from '../components/SlowQueriesHistory';
 import { MetricsTimeline } from '../components/MetricsTimeline';
 import { EventsLog } from '../components/EventsLog';
 import { Clock, TrendingUp, Bell, Calendar, Download, FileSpreadsheet } from 'lucide-react';
+import { Layout } from '../components/Layout';
+import { useActiveConnection } from '../hooks/useActiveConnection';
 
 type TabType = 'slow-queries' | 'metrics' | 'events';
 
 export const HistoryPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('slow-queries');
-  const [selectedDatabase, setSelectedDatabase] = useState({
-    type: 'postgres',
-    name: 'neondb'
-  });
+  const {
+    connectionOptions,
+    selectedConnection,
+    selectedKey,
+    setActiveConnection
+  } = useActiveConnection();
 
   // Date range state
   const [startDate, setStartDate] = useState<string>(() => {
@@ -35,9 +39,14 @@ export const HistoryPage: React.FC = () => {
   // Export functions
   const handleExportToExcel = async () => {
     try {
+      if (!selectedConnection) {
+        alert('No hay conexiones activas para exportar.');
+        return;
+      }
+
       const params = new URLSearchParams({
-        databaseType: selectedDatabase.type,
-        databaseName: selectedDatabase.name,
+        databaseType: selectedConnection.type,
+        databaseName: selectedConnection.name,
         startDate,
         endDate
       });
@@ -62,9 +71,14 @@ export const HistoryPage: React.FC = () => {
 
   const handleExportMetricsCSV = async () => {
     try {
+      if (!selectedConnection) {
+        alert('No hay conexiones activas para exportar.');
+        return;
+      }
+
       const params = new URLSearchParams({
-        databaseType: selectedDatabase.type,
-        databaseName: selectedDatabase.name,
+        databaseType: selectedConnection.type,
+        databaseName: selectedConnection.name,
         startDate,
         endDate
       });
@@ -89,9 +103,14 @@ export const HistoryPage: React.FC = () => {
 
   const handleExportSlowQueriesCSV = async () => {
     try {
+      if (!selectedConnection) {
+        alert('No hay conexiones activas para exportar.');
+        return;
+      }
+
       const params = new URLSearchParams({
-        databaseType: selectedDatabase.type,
-        databaseName: selectedDatabase.name,
+        databaseType: selectedConnection.type,
+        databaseName: selectedConnection.name,
         startDate,
         endDate
       });
@@ -121,7 +140,7 @@ export const HistoryPage: React.FC = () => {
   ];
 
   return (
-    <div className="min-h-screen bg-slate-900 p-6">
+    <Layout>
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="mb-6">
@@ -136,21 +155,17 @@ export const HistoryPage: React.FC = () => {
           <label className="text-slate-400 text-sm mb-2 block">Database</label>
           <div className="flex gap-4">
             <select
-              value={selectedDatabase.type}
-              onChange={(e) => setSelectedDatabase({ ...selectedDatabase, type: e.target.value })}
+              value={selectedKey}
+              onChange={(e) => setActiveConnection(e.target.value)}
               className="bg-slate-700 text-white px-4 py-2 rounded-lg border border-slate-600 focus:border-blue-500 focus:outline-none"
             >
-              <option value="postgres">PostgreSQL</option>
-              <option value="mysql">MySQL</option>
-              <option value="sqlserver">SQL Server</option>
+              {connectionOptions.length === 0 && <option value="">No hay conexiones activas</option>}
+              {connectionOptions.map((conn) => (
+                <option key={conn.key} value={conn.key}>
+                  {conn.type.toUpperCase()} - {conn.name}
+                </option>
+              ))}
             </select>
-            <input
-              type="text"
-              value={selectedDatabase.name}
-              onChange={(e) => setSelectedDatabase({ ...selectedDatabase, name: e.target.value })}
-              placeholder="Database name"
-              className="bg-slate-700 text-white px-4 py-2 rounded-lg border border-slate-600 focus:border-blue-500 focus:outline-none flex-1"
-            />
           </div>
         </div>
 
@@ -274,8 +289,8 @@ export const HistoryPage: React.FC = () => {
         <div className="space-y-6">
           {activeTab === 'slow-queries' && (
             <SlowQueriesHistory
-              databaseType={selectedDatabase.type}
-              databaseName={selectedDatabase.name}
+              databaseType={selectedConnection?.type}
+              databaseName={selectedConnection?.name}
               minExecutionTime={1}
               autoRefresh={false}
               startDate={startDate}
@@ -285,8 +300,8 @@ export const HistoryPage: React.FC = () => {
 
           {activeTab === 'metrics' && (
             <MetricsTimeline
-              databaseType={selectedDatabase.type}
-              databaseName={selectedDatabase.name}
+              databaseType={selectedConnection?.type || 'postgres'}
+              databaseName={selectedConnection?.name || ''}
               autoRefresh={false}
               startDate={startDate}
               endDate={endDate}
@@ -299,10 +314,12 @@ export const HistoryPage: React.FC = () => {
               limit={100}
               startDate={startDate}
               endDate={endDate}
+              databaseType={selectedConnection?.type}
+              databaseName={selectedConnection?.name}
             />
           )}
         </div>
       </div>
-    </div>
+    </Layout>
   );
 };

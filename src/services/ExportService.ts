@@ -9,6 +9,40 @@ export interface ExportOptions {
   databaseName?: string;
 }
 
+interface MetricRecord {
+  timestamp: string;
+  database_type: string;
+  database_name: string;
+  connections_total: number;
+  connections_active: number;
+  response_time?: number;
+  qps?: number;
+  cache_hit_ratio?: number;
+  database_size?: number;
+  slow_queries?: number;
+}
+
+interface SlowQueryRecord {
+  timestamp: string;
+  database_type: string;
+  database_name: string;
+  query: string;
+  execution_time: number;
+  username?: string;
+  client_address?: string;
+  rows_affected?: number;
+}
+
+interface EventRecord {
+  timestamp: string;
+  event_type: string;
+  severity: string;
+  message: string;
+  details?: string;
+  database_type?: string;
+  database_name?: string;
+}
+
 export class ExportService {
   private historicalDb: HistoricalDatabase;
 
@@ -49,26 +83,24 @@ export class ExportService {
       };
 
       // Get metrics data
-      let metrics;
+      let metrics: MetricRecord[] = [];
       if (options.startDate && options.endDate && options.databaseType && options.databaseName) {
         metrics = this.historicalDb.getMetricsByTimeRange(
           options.databaseType,
           options.databaseName,
           options.startDate,
           options.endDate
-        );
+        ) as unknown as MetricRecord[];
       } else if (options.databaseType && options.databaseName) {
         metrics = this.historicalDb.getMetricsHistory(
           options.databaseType,
           options.databaseName,
           24 * 30 // Last 30 days
-        );
-      } else {
-        metrics = [];
+        ) as unknown as MetricRecord[];
       }
 
       // Add data rows
-      metrics.forEach((record: any) => {
+      metrics.forEach((record) => {
         metricsSheet.addRow({
           timestamp: new Date(record.timestamp).toLocaleString(),
           database: `${record.database_type}/${record.database_name}`,
@@ -105,25 +137,23 @@ export class ExportService {
       };
 
       // Get slow queries data
-      let slowQueries;
+      let slowQueries: SlowQueryRecord[] = [];
       if (options.startDate && options.endDate && options.databaseType && options.databaseName) {
         slowQueries = this.historicalDb.getSlowQueriesByTimeRange(
           options.startDate,
           options.endDate,
           options.databaseType,
           options.databaseName
-        );
+        ) as unknown as SlowQueryRecord[];
       } else if (options.databaseType && options.databaseName) {
         slowQueries = this.historicalDb.getSlowQueries(
           options.databaseType,
           options.databaseName,
           100
-        );
-      } else {
-        slowQueries = [];
+        ) as unknown as SlowQueryRecord[];
       }
 
-      slowQueries.forEach((record: any) => {
+      slowQueries.forEach((record) => {
         slowQueriesSheet.addRow({
           timestamp: new Date(record.timestamp).toLocaleString(),
           database: `${record.database_type}/${record.database_name}`,
@@ -157,17 +187,17 @@ export class ExportService {
       };
 
       // Get events data
-      let events;
+      let events: EventRecord[];
       if (options.startDate && options.endDate) {
         events = this.historicalDb.getEventsByTimeRange(
           options.startDate,
           options.endDate
-        );
+        ) as unknown as EventRecord[];
       } else {
-        events = this.historicalDb.getEvents(1000);
+        events = this.historicalDb.getEvents(1000) as unknown as EventRecord[];
       }
 
-      events.forEach((record: any) => {
+      events.forEach((record) => {
         eventsSheet.addRow({
           timestamp: new Date(record.timestamp).toLocaleString(),
           event_type: record.event_type,
@@ -181,8 +211,11 @@ export class ExportService {
       });
 
       // Generate buffer
-      const buffer = await workbook.xlsx.writeBuffer();
-      return buffer as Buffer;
+      const generated = await workbook.xlsx.writeBuffer();
+      if (Buffer.isBuffer(generated)) {
+        return generated;
+      }
+      return Buffer.from(generated as ArrayBuffer);
     } catch (error: any) {
       logger.error('Error exporting to Excel:', error);
       throw new Error(`Failed to export to Excel: ${error.message}`);
@@ -191,29 +224,27 @@ export class ExportService {
 
   async exportSlowQueriesToCSV(options: ExportOptions): Promise<string> {
     try {
-      let slowQueries;
+      let slowQueries: SlowQueryRecord[] = [];
       if (options.startDate && options.endDate && options.databaseType && options.databaseName) {
         slowQueries = this.historicalDb.getSlowQueriesByTimeRange(
           options.startDate,
           options.endDate,
           options.databaseType,
           options.databaseName
-        );
+        ) as unknown as SlowQueryRecord[];
       } else if (options.databaseType && options.databaseName) {
         slowQueries = this.historicalDb.getSlowQueries(
           options.databaseType,
           options.databaseName,
           1000
-        );
-      } else {
-        slowQueries = [];
+        ) as unknown as SlowQueryRecord[];
       }
 
       // CSV header
       let csv = 'Timestamp,Database Type,Database Name,Execution Time (ms),Username,Client,Rows,Query\n';
 
       // CSV rows
-      slowQueries.forEach((record: any) => {
+      slowQueries.forEach((record) => {
         const query = record.query.replace(/"/g, '""'); // Escape quotes
         csv += `"${new Date(record.timestamp).toISOString()}",`;
         csv += `"${record.database_type}",`;
@@ -234,29 +265,27 @@ export class ExportService {
 
   async exportMetricsToCSV(options: ExportOptions): Promise<string> {
     try {
-      let metrics;
+      let metrics: MetricRecord[] = [];
       if (options.startDate && options.endDate && options.databaseType && options.databaseName) {
         metrics = this.historicalDb.getMetricsByTimeRange(
           options.databaseType,
           options.databaseName,
           options.startDate,
           options.endDate
-        );
+        ) as unknown as MetricRecord[];
       } else if (options.databaseType && options.databaseName) {
         metrics = this.historicalDb.getMetricsHistory(
           options.databaseType,
           options.databaseName,
           24 * 30
-        );
-      } else {
-        metrics = [];
+        ) as unknown as MetricRecord[];
       }
 
       // CSV header
       let csv = 'Timestamp,Database Type,Database Name,Connections Total,Connections Active,Response Time (ms),QPS,Cache Hit Ratio (%),DB Size (MB),Slow Queries\n';
 
       // CSV rows
-      metrics.forEach((record: any) => {
+      metrics.forEach((record) => {
         csv += `"${new Date(record.timestamp).toISOString()}",`;
         csv += `"${record.database_type}",`;
         csv += `"${record.database_name}",`;

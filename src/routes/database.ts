@@ -4,6 +4,7 @@ import { MySQLConnector } from '../connectors/MySQLConnector';
 import { MSSQLConnector } from '../connectors/MSSQLConnector';
 import { AlertSystem } from '../services/AlertSystem';
 import { config } from '../config';
+import { loadManagedConnections } from '../config/connections';
 
 const router = Router();
 const pgConnector = PostgresConnector.getInstance();
@@ -16,29 +17,42 @@ router.get('/:type/slow-queries', async (req: Request, res: Response) => {
   try {
     const { type } = req.params;
     const limit = req.query.limit ? parseInt(req.query.limit as string) : 10;
-    
-    let slowQueries = [];
-    
-    switch (type) {
-      case 'postgres':
-        if (config.databases.postgres.enabled) {
-          slowQueries = await pgConnector.getSlowQueries(limit);
-        }
-        break;
-      case 'mysql':
-        if (config.databases.mysql.enabled) {
-          slowQueries = await mysqlConnector.getSlowQueries(limit);
-        }
-        break;
-      case 'mssql':
-        if (config.databases.mssql.enabled) {
-          slowQueries = await mssqlConnector.getSlowQueries(limit);
-        }
-        break;
-      default:
-        return res.status(400).json({ error: 'Invalid database type' });
+
+    if (type !== 'postgres' && type !== 'mysql' && type !== 'mssql') {
+      return res.status(400).json({ error: 'Invalid database type' });
     }
-    
+
+    const targetConnections = loadManagedConnections().filter(
+      (conn) => conn.enabled && conn.type === type
+    );
+
+    const allSlowQueries: any[] = [];
+
+    for (const conn of targetConnections) {
+      try {
+        let connQueries: any[] = [];
+        if (conn.type === 'postgres') {
+          connQueries = await pgConnector.getSlowQueriesForConnection(conn, limit);
+        } else if (conn.type === 'mysql') {
+          connQueries = await mysqlConnector.getSlowQueriesForConnection(conn, limit);
+        } else {
+          connQueries = await mssqlConnector.getSlowQueriesForConnection(conn, limit);
+        }
+
+        allSlowQueries.push(
+          ...connQueries.map((q: any) => ({
+            ...q,
+            databaseName: conn.name,
+            databaseType: conn.type
+          }))
+        );
+      } catch {
+        // Ignore per-connection query failures and continue with others
+      }
+    }
+
+    const slowQueries = allSlowQueries.slice(0, Math.max(limit, 1) * targetConnections.length);
+
     res.json(slowQueries);
   } catch (error: any) {
     res.status(500).json({
@@ -50,35 +64,17 @@ router.get('/:type/slow-queries', async (req: Request, res: Response) => {
 
 // Get database list
 router.get('/list', (req: Request, res: Response) => {
-  const databases = [];
-  
-  if (config.databases.postgres.enabled) {
-    databases.push({
-      type: 'postgres',
-      name: config.databases.postgres.database,
-      host: config.databases.postgres.host,
-      port: config.databases.postgres.port
-    });
-  }
-  
-  if (config.databases.mysql.enabled) {
-    databases.push({
-      type: 'mysql',
-      name: config.databases.mysql.database,
-      host: config.databases.mysql.host,
-      port: config.databases.mysql.port
-    });
-  }
-  
-  if (config.databases.mssql.enabled) {
-    databases.push({
-      type: 'mssql',
-      name: config.databases.mssql.database,
-      host: config.databases.mssql.server,
-      port: config.databases.mssql.port
-    });
-  }
-  
+  const databases = loadManagedConnections()
+    .filter((conn) => conn.enabled)
+    .map((conn) => ({
+      id: conn.id,
+      type: conn.type,
+      name: conn.name,
+      host: conn.host,
+      port: conn.port,
+      database: conn.database
+    }));
+
   res.json(databases);
 });
 

@@ -1,5 +1,5 @@
 import { Alert } from '../api';
-import { AlertTriangle, AlertCircle, Info, X, CheckCircle } from 'lucide-react';
+import { AlertTriangle, AlertCircle, Info, CheckCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { api } from '../api';
 

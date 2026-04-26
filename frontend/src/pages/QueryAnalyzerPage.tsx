@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Layout } from '../components/Layout';
+import { useActiveConnection } from '../hooks/useActiveConnection';
 
 interface QuerySuggestion {
   type: 'warning' | 'suggestion' | 'optimization';
@@ -17,16 +18,25 @@ interface QueryExplanation {
 }
 
 const QueryAnalyzerPage: React.FC = () => {
-  const navigate = useNavigate();
   const [query, setQuery] = useState('');
-  const [databaseType, setDatabaseType] = useState('postgres');
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<QueryExplanation | null>(null);
   const [error, setError] = useState<string>('');
+  const {
+    connectionOptions,
+    selectedConnection,
+    selectedKey,
+    setActiveConnection
+  } = useActiveConnection({ allowedTypes: ['postgres', 'mysql'] });
 
   const handleAnalyze = async () => {
     if (!query.trim()) {
       setError('Please enter a SQL query to analyze');
+      return;
+    }
+
+    if (!selectedConnection) {
+      setError('No active database connection selected');
       return;
     }
 
@@ -35,15 +45,15 @@ const QueryAnalyzerPage: React.FC = () => {
     setResult(null);
 
     try {
-      const response = await fetch('http://localhost:3001/api/query-analyzer/analyze', {
+      const response = await fetch('/api/query-analyzer/analyze', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           query: query.trim(),
-          databaseType,
-          databaseName: 'neondb'
+          databaseType: selectedConnection.type,
+          databaseName: selectedConnection.name
         })
       });
 
@@ -88,16 +98,10 @@ const QueryAnalyzerPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 p-6">
+    <Layout>
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <button
-            onClick={() => navigate('/')}
-            className="mb-4 text-blue-400 hover:text-blue-300 flex items-center gap-2 transition-colors"
-          >
-            ← Back to Dashboard
-          </button>
           <h1 className="text-4xl font-bold text-white mb-2">Query Analyzer</h1>
           <p className="text-gray-400">
             Analyze SQL queries and get optimization suggestions
@@ -108,15 +112,19 @@ const QueryAnalyzerPage: React.FC = () => {
         <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl shadow-2xl p-6 border border-gray-700/50 mb-6">
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">
-              Database Type
+              Active Database
             </label>
             <select
-              value={databaseType}
-              onChange={(e) => setDatabaseType(e.target.value)}
+              value={selectedKey}
+              onChange={(e) => setActiveConnection(e.target.value)}
               className="w-full bg-gray-900/50 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <option value="postgres">PostgreSQL</option>
-              <option value="mysql">MySQL</option>
+              {connectionOptions.length === 0 && <option value="">No active connections</option>}
+              {connectionOptions.map((conn) => (
+                <option key={conn.key} value={conn.key}>
+                  {conn.type.toUpperCase()} - {conn.name}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -277,7 +285,7 @@ const QueryAnalyzerPage: React.FC = () => {
           </div>
         )}
       </div>
-    </div>
+    </Layout>
   );
 };
 

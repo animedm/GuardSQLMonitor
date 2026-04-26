@@ -8,6 +8,13 @@ import { MetricsCollector } from './MetricsCollector';
 import { AlertSystem } from './AlertSystem';
 import { HistoricalDatabase } from './HistoricalDatabase';
 import { DatabaseMetrics } from '../types';
+import {
+  AlertThresholds,
+  GlobalAlertSettings,
+  ManagedConnection,
+  loadManagedConfiguration,
+  applyPrimaryConnectionsToRuntimeConfig
+} from '../config/connections';
 
 export class DatabaseMonitor {
   private static instance: DatabaseMonitor;
@@ -43,6 +50,9 @@ export class DatabaseMonitor {
     }
 
     try {
+      const managedConnections = loadManagedConfiguration().connections;
+      applyPrimaryConnectionsToRuntimeConfig(managedConnections);
+
       // Initialize database connections
       if (config.databases.postgres.enabled) {
         await this.pgConnector.connect();
@@ -92,53 +102,30 @@ export class DatabaseMonitor {
 
   private async collectMetrics(): Promise<void> {
     const metrics: DatabaseMetrics[] = [];
+    const managedConfig = loadManagedConfiguration();
+    const connections = managedConfig.connections.filter((conn) => conn.enabled);
 
     try {
-      // Collect PostgreSQL metrics
-      if (config.databases.postgres.enabled) {
+      for (const conn of connections) {
         try {
-          const pgMetrics = await this.pgConnector.getMetrics();
-          metrics.push(pgMetrics);
-          this.metricsCollector.recordMetrics(pgMetrics);
-          this.checkThresholds(pgMetrics);
-          
-          // Save to historical database
-          this.saveMetricsToHistory(pgMetrics);
-          await this.saveSlowQueriesToHistory('postgres', pgMetrics.databaseName);
-        } catch (error) {
-          logger.error('Error collecting PostgreSQL metrics:', error);
-        }
-      }
+          let dbMetrics: DatabaseMetrics;
 
-      // Collect MySQL metrics
-      if (config.databases.mysql.enabled) {
-        try {
-          const mysqlMetrics = await this.mysqlConnector.getMetrics();
-          metrics.push(mysqlMetrics);
-          this.metricsCollector.recordMetrics(mysqlMetrics);
-          this.checkThresholds(mysqlMetrics);
-          
-          // Save to historical database
-          this.saveMetricsToHistory(mysqlMetrics);
-          await this.saveSlowQueriesToHistory('mysql', mysqlMetrics.databaseName);
-        } catch (error) {
-          logger.error('Error collecting MySQL metrics:', error);
-        }
-      }
+          if (conn.type === 'postgres') {
+            dbMetrics = await this.pgConnector.getMetricsForConnection(conn);
+          } else if (conn.type === 'mysql') {
+            dbMetrics = await this.mysqlConnector.getMetricsForConnection(conn);
+          } else {
+            dbMetrics = await this.mssqlConnector.getMetricsForConnection(conn);
+          }
 
-      // Collect SQL Server metrics
-      if (config.databases.mssql.enabled) {
-        try {
-          const mssqlMetrics = await this.mssqlConnector.getMetrics();
-          metrics.push(mssqlMetrics);
-          this.metricsCollector.recordMetrics(mssqlMetrics);
-          this.checkThresholds(mssqlMetrics);
-          
-          // Save to historical database
-          this.saveMetricsToHistory(mssqlMetrics);
-          await this.saveSlowQueriesToHistory('mssql', mssqlMetrics.databaseName);
+          metrics.push(dbMetrics);
+          this.metricsCollector.recordMetrics(dbMetrics);
+          this.checkThresholds(conn, dbMetrics, managedConfig.alerts);
+
+          this.saveMetricsToHistory(dbMetrics);
+          await this.saveSlowQueriesToHistory(conn, dbMetrics.databaseName);
         } catch (error) {
-          logger.error('Error collecting SQL Server metrics:', error);
+          logger.error(`Error collecting ${conn.type} metrics for ${conn.name}:`, error);
         }
       }
 
@@ -148,12 +135,97 @@ export class DatabaseMonitor {
     }
   }
 
-  private checkThresholds(metrics: DatabaseMetrics): void {
-    const thresholds = config.alerts.thresholds;
+  private getEffectiveThresholds(connection: ManagedConnection, globalAlerts: GlobalAlertSettings): AlertThresholds {
+    const overrides = connection.alertSettings?.thresholds || {};
+    return {
+      cpu: overrides.cpu ?? globalAlerts.thresholds.cpu,
+      memory: overrides.memory ?? globalAlerts.thresholds.memory,
+      connections: overrides.connections ?? globalAlerts.thresholds.connections,
+      slowQueryCount: overrides.slowQueryCount ?? globalAlerts.thresholds.slowQueryCount
+    };
+  }
+
+  private isConnectionAlertSnoozed(connection: ManagedConnection): boolean {
+    const snoozedUntil = connection.alertSettings?.snoozedUntil;
+    if (!snoozedUntil) {
+      return false;
+    }
+
+    const snoozeTime = Date.parse(snoozedUntil);
+    if (Number.isNaN(snoozeTime)) {
+      return false;
+    }
+
+    return Date.now() < snoozeTime;
+  }
+
+  private isHourInRange(currentHour: number, startHour: number, endHour: number): boolean {
+    if (startHour === endHour) {
+      return true;
+    }
+    if (startHour < endHour) {
+      return currentHour >= startHour && currentHour < endHour;
+    }
+    return currentHour >= startHour || currentHour < endHour;
+  }
+
+  private isMetricMutedInMaintenance(
+    connection: ManagedConnection,
+    metric: 'cpu' | 'memory' | 'connections' | 'slowQueryCount'
+  ): boolean {
+    const mutedMetrics = connection.alertSettings?.maintenanceWindow?.mutedMetrics;
+    if (!mutedMetrics) {
+      return true;
+    }
+    return mutedMetrics[metric] !== false;
+  }
+
+  private isConnectionInMaintenanceWindow(connection: ManagedConnection): boolean {
+    const windowConfig = connection.alertSettings?.maintenanceWindow;
+    if (!windowConfig || !windowConfig.enabled) {
+      return false;
+    }
+
+    const now = new Date();
+    const day = now.getDay();
+    const allowedDays = windowConfig.daysOfWeek || [];
+    if (allowedDays.length > 0 && !allowedDays.includes(day)) {
+      return false;
+    }
+
+    const hour = now.getHours();
+    return this.isHourInRange(hour, windowConfig.startHour, windowConfig.endHour);
+  }
+
+  private checkThresholds(connection: ManagedConnection, metrics: DatabaseMetrics, globalAlerts: GlobalAlertSettings): void {
+    if (!globalAlerts.enabled) {
+      return;
+    }
+
+    if (connection.alertSettings && !connection.alertSettings.enabled) {
+      return;
+    }
+
+    if (this.isConnectionAlertSnoozed(connection)) {
+      return;
+    }
+
+    const inMaintenance = this.isConnectionInMaintenanceWindow(connection);
+
+    const thresholds = this.getEffectiveThresholds(connection, globalAlerts);
+    const cooldownMs = globalAlerts.cooldownMinutes * 60 * 1000;
+    const notifyEmail = {
+      enabled: globalAlerts.email.enabled,
+      to: globalAlerts.email.to
+    };
+    const notifyWebhook = {
+      enabled: globalAlerts.webhook.enabled,
+      url: globalAlerts.webhook.url
+    };
 
     // Check connection pool usage
     const connectionUsagePercent = (metrics.connections.total / metrics.connections.max) * 100;
-    if (connectionUsagePercent >= thresholds.connections) {
+    if (connectionUsagePercent >= thresholds.connections && !(inMaintenance && this.isMetricMutedInMaintenance(connection, 'connections'))) {
       this.alertSystem.createAlert({
         severity: connectionUsagePercent >= 95 ? 'critical' : 'warning',
         database: metrics.databaseName,
@@ -161,12 +233,15 @@ export class DatabaseMonitor {
         message: `Connection pool usage is at ${connectionUsagePercent.toFixed(1)}%`,
         metric: 'connection_usage',
         value: connectionUsagePercent,
-        threshold: thresholds.connections
+        threshold: thresholds.connections,
+        cooldownMs,
+        notifyEmail,
+        notifyWebhook
       });
     }
 
     // Check slow queries
-    if (metrics.performance.slowQueries >= thresholds.slowQueryCount) {
+    if (metrics.performance.slowQueries >= thresholds.slowQueryCount && !(inMaintenance && this.isMetricMutedInMaintenance(connection, 'slowQueryCount'))) {
       this.alertSystem.createAlert({
         severity: 'warning',
         database: metrics.databaseName,
@@ -174,12 +249,19 @@ export class DatabaseMonitor {
         message: `${metrics.performance.slowQueries} slow queries detected`,
         metric: 'slow_queries',
         value: metrics.performance.slowQueries,
-        threshold: thresholds.slowQueryCount
+        threshold: thresholds.slowQueryCount,
+        cooldownMs,
+        notifyEmail,
+        notifyWebhook
       });
     }
 
     // Check CPU usage
-    if (metrics.resources.cpuUsage && metrics.resources.cpuUsage >= thresholds.cpu) {
+    if (
+      metrics.resources.cpuUsage &&
+      metrics.resources.cpuUsage >= thresholds.cpu &&
+      !(inMaintenance && this.isMetricMutedInMaintenance(connection, 'cpu'))
+    ) {
       this.alertSystem.createAlert({
         severity: metrics.resources.cpuUsage >= 90 ? 'critical' : 'warning',
         database: metrics.databaseName,
@@ -187,12 +269,19 @@ export class DatabaseMonitor {
         message: `CPU usage is at ${metrics.resources.cpuUsage.toFixed(1)}%`,
         metric: 'cpu_usage',
         value: metrics.resources.cpuUsage,
-        threshold: thresholds.cpu
+        threshold: thresholds.cpu,
+        cooldownMs,
+        notifyEmail,
+        notifyWebhook
       });
     }
 
     // Check memory usage
-    if (metrics.resources.memoryUsage && metrics.resources.memoryUsage >= thresholds.memory) {
+    if (
+      metrics.resources.memoryUsage &&
+      metrics.resources.memoryUsage >= thresholds.memory &&
+      !(inMaintenance && this.isMetricMutedInMaintenance(connection, 'memory'))
+    ) {
       this.alertSystem.createAlert({
         severity: metrics.resources.memoryUsage >= 95 ? 'critical' : 'warning',
         database: metrics.databaseName,
@@ -200,7 +289,10 @@ export class DatabaseMonitor {
         message: `Memory usage is at ${metrics.resources.memoryUsage.toFixed(1)}%`,
         metric: 'memory_usage',
         value: metrics.resources.memoryUsage,
-        threshold: thresholds.memory
+        threshold: thresholds.memory,
+        cooldownMs,
+        notifyEmail,
+        notifyWebhook
       });
     }
   }
@@ -208,14 +300,17 @@ export class DatabaseMonitor {
   public async getHealthStatus() {
     const databases: any = {};
 
-    if (config.databases.postgres.enabled) {
-      databases.postgres = await this.pgConnector.healthCheck();
-    }
-    if (config.databases.mysql.enabled) {
-      databases.mysql = await this.mysqlConnector.healthCheck();
-    }
-    if (config.databases.mssql.enabled) {
-      databases.mssql = await this.mssqlConnector.healthCheck();
+    const connections = loadManagedConfiguration().connections.filter((conn) => conn.enabled);
+
+    for (const conn of connections) {
+      const key = `${conn.type}:${conn.name}`;
+      if (conn.type === 'postgres') {
+        databases[key] = await this.pgConnector.healthCheckForConnection(conn);
+      } else if (conn.type === 'mysql') {
+        databases[key] = await this.mysqlConnector.healthCheckForConnection(conn);
+      } else {
+        databases[key] = await this.mssqlConnector.healthCheckForConnection(conn);
+      }
     }
 
     const allHealthy = Object.values(databases).every((db: any) => db.status === 'up');
@@ -249,22 +344,22 @@ export class DatabaseMonitor {
     }
   }
 
-  private async saveSlowQueriesToHistory(dbType: string, dbName: string): Promise<void> {
+  private async saveSlowQueriesToHistory(conn: ManagedConnection, dbName: string): Promise<void> {
     try {
       let slowQueries: any[] = [];
 
-      if (dbType === 'postgres') {
-        slowQueries = await this.pgConnector.getSlowQueries();
-      } else if (dbType === 'mysql') {
-        slowQueries = await this.mysqlConnector.getSlowQueries();
-      } else if (dbType === 'mssql') {
-        slowQueries = await this.mssqlConnector.getSlowQueries();
+      if (conn.type === 'postgres') {
+        slowQueries = await this.pgConnector.getSlowQueriesForConnection(conn);
+      } else if (conn.type === 'mysql') {
+        slowQueries = await this.mysqlConnector.getSlowQueriesForConnection(conn);
+      } else if (conn.type === 'mssql') {
+        slowQueries = await this.mssqlConnector.getSlowQueriesForConnection(conn);
       }
 
       for (const query of slowQueries) {
         this.historicalDb.saveSlowQuery({
           timestamp: new Date().toISOString(),
-          databaseType: dbType,
+          databaseType: conn.type,
           databaseName: dbName,
           query: query.query || query.sql || '',
           executionTime: query.totalTime || query.executionTime || query.duration || 0,
@@ -279,7 +374,7 @@ export class DatabaseMonitor {
             timestamp: new Date().toISOString(),
             eventType: 'alert',
             severity: 'warning',
-            databaseType: dbType,
+            databaseType: conn.type,
             databaseName: dbName,
             message: `Very slow query detected (${(query.totalTime || query.executionTime).toFixed(0)}ms)`,
             details: query.query || query.sql || ''

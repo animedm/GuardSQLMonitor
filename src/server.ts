@@ -15,6 +15,8 @@ import historyRouter from './routes/history';
 import queryAnalyzerRouter from './routes/queryAnalyzer';
 import exportRouter from './routes/export';
 import monitoringRouter from './routes/monitoring';
+import connectionsRouter from './routes/connections';
+import { loadManagedConnections, applyPrimaryConnectionsToRuntimeConfig } from './config/connections';
 
 dotenv.config();
 
@@ -42,6 +44,7 @@ app.use('/api/history', historyRouter);
 app.use('/api/query-analyzer', queryAnalyzerRouter);
 app.use('/api/export', exportRouter);
 app.use('/api/monitoring', monitoringRouter);
+app.use('/api/connections', connectionsRouter);
 
 // Prometheus metrics endpoint
 app.get('/metrics', async (req, res) => {
@@ -71,6 +74,9 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
 // Initialize services
 const dbMonitor = DatabaseMonitor.getInstance();
 const alertSystem = AlertSystem.getInstance();
+
+// Load persisted connections and sync runtime defaults used by legacy routes/connectors
+applyPrimaryConnectionsToRuntimeConfig(loadManagedConnections());
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
